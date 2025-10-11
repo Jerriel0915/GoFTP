@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# local resources
+Resource
+
+# ftp_root
+ftp_root
+
 # Editor/IDE
 # .idea/
 # .vscode/
