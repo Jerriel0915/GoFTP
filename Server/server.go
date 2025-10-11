@@ -213,21 +213,54 @@ func (c *FTPConn) handlePASV() (ok bool, code Constant.Code, msg string, err err
 
 // 处理 改变工作目录
 func (c *FTPConn) handleCWD(args []string) (ok bool, code Constant.Code, msg string, err error) {
+	if c.authorisation == Constant.NONE {
+		return false, Constant.NotLogin, "You have not login.", nil
+	}
+
 	if len(args) != 1 || len(args[0]) == 0 {
 		return false, Constant.CommandArgsError, "Invalid number of arguments.", nil
 	}
 
 	newDir := args[0]
-	switch c.authorisation {
-	case Constant.ADMIN:
-		return c.cwdByAdmin(newDir)
-	case Constant.USER:
-		return c.cwdByUser(newDir)
-	case Constant.NONE:
-		fallthrough
-	default:
-		return false, Constant.NotLogin, "You have not login.", nil
+
+	// 路径安全检查
+	absPath, err := c.toAbsPath(newDir)
+	if err != nil {
+		return false, Constant.PathInvalid, err.Error(), err
 	}
+
+	// 检查是否存在对应目录
+	fileInfo, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, Constant.PathInvalid, "Directory does not exist.", err
+		}
+		return false, Constant.PathInvalid, "Error accessing path.", err
+	}
+
+	if !fileInfo.IsDir() {
+		return false, Constant.PathInvalid, "Path is not a directory.", errors.New("path is not a directory")
+	}
+
+	// 基于当前用户根目录，更新工作目录
+	var userRoot string
+	if c.authorisation == Constant.ADMIN {
+		userRoot, _ = filepath.Abs(c.rootDir)
+	} else { // USER
+		userRoot, _ = filepath.Abs(filepath.Join(c.rootDir, c.username))
+	}
+
+	newWorkDir, err := filepath.Rel(userRoot, absPath)
+	if err != nil {
+		return false, Constant.PathInvalid, "Error resolving relative path.", err
+	}
+
+	c.workDir = "/" + filepath.ToSlash(newWorkDir)
+	if c.workDir == "/." {
+		c.workDir = "/"
+	}
+
+	return true, Constant.FileCommandRunSuccess, "Directory changed successfully to " + c.workDir, nil
 }
 
 func (c *FTPConn) handlePWD() (ok bool, code Constant.Code, msg string, err error) {
@@ -237,120 +270,57 @@ func (c *FTPConn) handlePWD() (ok bool, code Constant.Code, msg string, err erro
 	return true, Constant.FileCommandRunSuccess, "You are now in " + c.workDir, nil
 }
 
-func (c *FTPConn) cwdByUser(newDir string) (ok bool, code Constant.Code, msg string, err error) {
-	// 用户根目录 ftp_root/<username>
-	userRoot := filepath.Join(c.rootDir, c.username)
-	// 确保用户目录存在
-	if _, err := os.Stat(userRoot); os.IsNotExist(err) {
-		if err := os.MkdirAll(userRoot, 0755); err != nil {
-			return false, Constant.PathInvalid, "Cannot create user directory.", err
+// toAbsPath 此方法将客户端提供的 path 转换为安全且绝对的服务端绝对路径，确保处于合法操作范围内
+func (c *FTPConn) toAbsPath(path string) (string, error) {
+	var userRoot string
+	var err error
+
+	// 根据职权判断
+	switch c.authorisation {
+	case Constant.ADMIN:
+		userRoot, err = filepath.Abs(c.rootDir)
+		if err != nil {
+			return "", errors.New("cannot resolve server root directory")
 		}
+	case Constant.USER:
+		userRoot = filepath.Join(c.rootDir, c.username)
+		// 确保用户的根目录存在，如不存在则创建
+		if _, err := os.Stat(userRoot); os.IsNotExist(err) {
+			if err := os.MkdirAll(userRoot, 0755); err != nil {
+				return "", errors.New("cannot create user directory")
+			}
+		}
+		userRoot, err = filepath.Abs(userRoot)
+		if err != nil {
+			return "", errors.New("cannot resolve user root directory")
+		}
+	default:
+		return "", errors.New("user not logged in")
 	}
 
 	var targetPath string
-	if strings.HasPrefix(newDir, "/") {
-		targetPath = filepath.Join(userRoot, newDir)
+	// 若新路径以 “/” 开头，则视作从根目录开始
+	// 若不是，则视作从当前工作目录开始
+	if strings.HasPrefix(path, "/") {
+		targetPath = filepath.Join(userRoot, path)
 	} else {
+		// Note: c.workDir is relative to the user's root.
 		currentPath := filepath.Join(userRoot, c.workDir)
-		targetPath = filepath.Join(currentPath, newDir)
+		targetPath = filepath.Join(currentPath, path)
 	}
 
-	// 清理路径名，获取绝对路径
+	// 处理 “..” 和 “.”
 	cleanPath, err := filepath.Abs(targetPath)
 	if err != nil {
-		return false, Constant.PathInvalid, "Error resolving path.", err
+		return "", errors.New("error resolving path")
 	}
 
-	// 获取用户根目录绝对路径
-	absUserRoot, err := filepath.Abs(userRoot)
-	if err != nil {
-		return false, Constant.PathInvalid, "Cannot resolve user root directory.", err
+	// 安全监测：确保最终路径处于合法范围内
+	if !strings.HasPrefix(cleanPath, userRoot) {
+		return "", errors.New("access denied: attempt to access outside of designated directory")
 	}
 
-	// 安全检查，确保目标路径不超出用户目录
-	if !strings.HasPrefix(cleanPath, absUserRoot) {
-		return false, Constant.PathInvalid, "Access denied.", errors.New("attempt to access outside of user directory")
-	}
-
-	// 路径有效性检查
-	fileInfo, err := os.Stat(cleanPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, Constant.PathInvalid, "Directory does not exist.", err
-		}
-		return false, Constant.PathInvalid, "Error accessing path.", err
-	}
-
-	if !fileInfo.IsDir() {
-		return false, Constant.PathInvalid, "Path is not a directory.", errors.New("path is not a directory")
-	}
-
-	// 更新当前工作目录
-	newWorkDir, err := filepath.Rel(absUserRoot, cleanPath)
-	if err != nil {
-		return false, Constant.PathInvalid, "Error resolving relative path.", err
-	}
-
-	c.workDir = "/" + filepath.ToSlash(newWorkDir)
-	if c.workDir == "/." {
-		c.workDir = "/"
-	}
-
-	return true, Constant.FileCommandRunSuccess, "Directory changed successfully.", nil
-}
-
-func (c *FTPConn) cwdByAdmin(newDir string) (ok bool, code Constant.Code, msg string, err error) {
-	var targetPath string
-	if strings.HasPrefix(newDir, "/") {
-		// 以 "/" 开头的地址视为从根目录开始 <rootDir>/...
-		targetPath = filepath.Join(c.rootDir, newDir)
-	} else {
-		// 否则从当前工作目录开始 <rootDir>/<workDir>/...
-		currentPath := filepath.Join(c.rootDir, c.workDir)
-		targetPath = filepath.Join(currentPath, newDir)
-	}
-
-	// 清理路径名，获取绝对路径
-	cleanPath, err := filepath.Abs(targetPath)
-	if err != nil {
-		return false, Constant.PathInvalid, "Error resolving path.", err
-	}
-
-	// 获取根目录绝对路径
-	absRootDir, err := filepath.Abs(c.rootDir)
-	if err != nil {
-		return false, Constant.PathInvalid, "Cannot resolve server root directory.", err
-	}
-
-	// 安全检查，确保路径不超出根目录
-	if !strings.HasPrefix(cleanPath, absRootDir) {
-		return false, Constant.PathInvalid, "Access denied.", errors.New("attempt to access outside of ftp root")
-	}
-
-	// 路径有效性检查
-	fileInfo, err := os.Stat(cleanPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, Constant.PathInvalid, "Directory does not exist.", err
-		}
-		return false, Constant.PathInvalid, "Error accessing path.", err
-	}
-
-	if !fileInfo.IsDir() {
-		return false, Constant.PathInvalid, "Path is not a directory.", errors.New("path is not a directory")
-	}
-
-	// 更新当前工作目录
-	newWorkDir, err := filepath.Rel(absRootDir, cleanPath)
-	if err != nil {
-		return false, Constant.PathInvalid, "Error resolving relative path.", err
-	}
-	c.workDir = "/" + filepath.ToSlash(newWorkDir)
-	if c.workDir == "/." {
-		c.workDir = "/"
-	}
-
-	return true, Constant.FileCommandRunSuccess, "Directory changed successfully.", nil
+	return cleanPath, nil
 }
 
 // 从 PASV_PORT_MIN 到 PASV_PORT_MAX 中选取一个可用的端口号并返回
