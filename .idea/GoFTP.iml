@@ -5,6 +5,8 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/Resource" />
       <excludeFolder url="file://$MODULE_DIR$/ftp_root" />
+      <excludeFolder url="file://$MODULE_DIR$/Downloads" />
+      <excludeFolder url="file://$MODULE_DIR$/test" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

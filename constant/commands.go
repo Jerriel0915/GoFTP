@@ -1,4 +1,4 @@
-package Constant
+package constant
 
 type Commands string
 
@@ -23,4 +23,13 @@ const (
 
 	// PWD 查看当前工作目录
 	PWD = "pwd"
+
+	// LIST 获取子目录或文件列表
+	LIST = "list"
+
+	// STOR 上传文件
+	STOR = "stor"
+
+	// RETR 下载文件
+	RETR = "retr"
 )
